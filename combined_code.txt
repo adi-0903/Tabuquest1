@@ -1,0 +1,1107 @@
+# File: config.json
+    {
+        "settings": {
+        "input_folder": "input_folder",
+        "output_folder":"output_folder",
+        "output_excel_filename":"Question_Responses_Output.xlsx",
+        "image_directory_name":"extracted_images"
+    },
+    "openai" :{
+        "openai_only_text_model":"gpt-3.5-turbo",
+        "openai_text_image_model":"gpt-4o",
+        "temperature":0.0
+    },
+    "logging": {
+        "log_file": "logs.log",
+        "log_level": "INFO",
+        "max_bytes": 5242880,
+        "backup_count": 5,
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    },
+    "VectorDB": {
+        "collection_name" : "PDF_text_image_collection",
+        "embedding_model_name": "text-embedding-ada-002",
+        "vector_db_persist_directory_name": "MyVectorDB",
+        "retriever":{
+            "search_algorithm":"similarity",
+            "score_threshold": 0.7,
+            "max_images":5,
+            "top_k":5
+
+        }
+    },
+    "text_splitter" :{
+        "chunk_size":1000,
+        "chunk_overlap":200
+    }
+}
+
+# File: file_processer.py
+import os
+from logging_config import logger
+from typing import Any
+from utilities import config
+from pdf_processing import process_pdf
+from word_processing import process_word_text
+from txt_processing import process_text
+
+def process_all_files(data_folder: str, vector_db: Any, openai_client: Any, model_name: str, text_chunker: Any) -> None:
+    """
+    Processes all PDF, TXT, and Word files in the specified data folder.
+
+    Args:
+        data_folder (str): The path to the folder containing files.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        openai_client (Any): An instance of the OpenAI client to interact with the API.
+        model_name (str): The name of the OpenAI model to use for generating summaries.
+        text_chunker (Any): An instance of the text splitter to use for splitting text.
+    """
+
+    # Check if the data folder exists
+    if not os.path.exists(data_folder):
+        logger.error(f"The specified data folder does not exist: {data_folder}")
+        print(f"Error: The specified data folder does not exist: {data_folder}")
+        return
+
+    # Create the output folder for extracted images
+    extracted_images_foldername = config["settings"].get("image_directory_name", "extracted_images") or "extracted_images"
+    output_folder = os.path.join(data_folder, extracted_images_foldername)
+    os.makedirs(output_folder, exist_ok=True)
+
+    files = os.listdir(data_folder)
+    if not files:
+        logger.warning("No files found in the specified data folder.")
+        print("Warning: No files found in the specified data folder.")
+        return
+
+    # Iterate through all files in the data folder
+    for filename in files:
+        file_path = os.path.join(data_folder, filename)
+
+        try:
+            if filename.lower().endswith('.pdf'):
+                logger.info(f"Processing PDF file: {filename}")
+                print(f"Processing PDF file: {filename}")
+                process_pdf(file_path, output_folder, vector_db, openai_client, model_name, text_chunker)
+                logger.info(f"Processed PDF file: {filename}")
+                print(f"Processed PDF file: {filename}")
+
+            elif filename.lower().endswith('.txt'):
+                logger.info(f"Processing TXT file: {filename}")
+                print(f"Processing TXT file: {filename}")
+                process_text(file_path, vector_db, text_chunker)
+                logger.info(f"Processed TXT file: {filename}")
+                print(f"Processed TXT file: {filename}")
+
+            elif filename.lower().endswith('.docx'):
+                logger.info(f"Processing Word file: {filename}")
+                print(f"Processing Word file: {filename}")
+                process_word_text(file_path, vector_db, text_chunker)
+                logger.info(f"Processed Word file: {filename}")
+                print(f"Processed Word file: {filename}")
+
+            else:
+                if config["settings"]["image_directory_name"] != filename:
+                    logger.warning(f"Unsupported file type: {filename}")
+                    print(f"Warning: Unsupported file type: {filename}")
+
+        except Exception as e:
+            logger.error(f"Error processing file {filename}: {e}")
+            print(f"Error processing file {filename}: {e}")
+
+    logger.info("All files have been processed.")
+    print("All files have been processed.")
+
+# File: image_processing.py
+import base64
+from typing import Any
+import os
+from utilities import config
+from utilities import logger
+def encode_image_base64(image_path: str) -> str:
+    """
+    Encodes an image file to a Base64 string.
+
+    Args:
+        image_path (str): The path to the image file to be encoded.
+
+    Returns:
+        str: The Base64 encoded string of the image.
+
+    Raises:
+        FileNotFoundError: If the image file does not exist.
+        IOError: If there is an error reading the image file.
+    """
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(f"The file '{image_path}' does not exist.")
+    try:
+        with open(image_path, 'rb') as image_file:
+            image_filename = os.path.basename(image_path)
+            encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+            logger.info(f"Successfully encoded image: {image_filename}")
+    except IOError as e:
+        raise IOError(f"An error occurred while reading the image file: {e}")
+    return encoded_image
+
+def image_summary_generator(encoded_image: str, model_name: str, openai_client: Any) -> str:
+    """
+    Generates a summary of an image using a specified OpenAI model.
+
+    Args:
+        encoded_image (str): The Base64 encoded image string.
+        model_name (str): The name of the OpenAI model to use for generating the summary.
+        openai_client (Any): An instance of the OpenAI client to interact with the API.
+
+    Returns:
+        str: The generated summary of the image.
+
+    Raises:
+        ValueError: If the encoded image is empty or if the model response is invalid.
+        Exception: If there is an error with the OpenAI API call.
+    """
+    if not encoded_image:
+        raise ValueError("The encoded image string cannot be empty.")
+    try:
+        # Create the model response
+        model_response = openai_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert image analyst. Your task is to analyze the provided image and generate a detailed summary.The summary should include key elements such as the main subjects, actions, context, and notable features of the image.This summary should be concise yet informative, making it suitable for retrieval when answering user questions related to the image."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Here is an image for you to summarize:"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{encoded_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=config["openai"]["temperature"],
+        )
+        # Check if the model response is valid
+        if not model_response.choices or not model_response.choices[0].message.content:
+            raise ValueError("Invalid response from the model.")
+        image_summary = model_response.choices[0].message.content
+    except Exception as e:
+        raise Exception(f"An error occurred while generating the image summary: {e}")
+    return image_summary
+
+# File: logging_config.py
+import logging
+import json
+import os
+from logging.handlers import RotatingFileHandler
+
+# Load logging configuration from JSON file
+def load_logging_config(config_file='config.json'):
+    """
+    Loads the logging configuration from a specified JSON file.
+
+    Args:
+        config_file (str): The path to the JSON configuration file. 
+                           Defaults to 'config.json'.
+
+    Returns:
+        dict: A dictionary containing the logging configuration. 
+              Only the 'logging' section from the JSON file is returned.
+
+    Raises:
+        FileNotFoundError: If the specified configuration file does not exist.
+        json.JSONDecodeError: If the configuration file is not a valid JSON.
+    """
+    with open(config_file, 'r') as file:
+        config = json.load(file)
+    return config['logging']  # Return only the logging section
+
+# Configure logging
+logging_config = load_logging_config()
+
+log_file = os.getenv('LOG_FILE', logging_config['log_file'])
+log_level = os.getenv('LOG_LEVEL', logging_config['log_level']).upper()
+max_bytes = logging_config['max_bytes']
+backup_count = logging_config['backup_count']
+log_format = logging_config['format']
+
+# Create a rotating file handler
+handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
+handler.setLevel(log_level)
+
+# Create a formatter and set it for the handler
+formatter = logging.Formatter(log_format)
+handler.setFormatter(formatter)
+
+# Create a logger object
+logger = logging.getLogger(__name__)
+logger.setLevel(log_level)
+logger.addHandler(handler)
+
+# Example usage
+if __name__ == "__main__":
+    logger.info("Logging system initialized.")
+
+# File: main.py
+import os
+from typing import Collection
+import pandas as pd
+from openai import OpenAI
+import logging
+from logging.handlers import RotatingFileHandler
+from langchain_community.vectorstores import Chroma
+from langchain_openai import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from vector_database import create_retriever
+from model_interaction import generate_answer_from_vector_db
+from logging_config import logger
+from utilities import config
+from file_processer import process_all_files
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def initialize_openai_client():
+    """
+    Initialize the OpenAI client.
+
+    Returns:
+        openai: Initialized OpenAI client.
+    """
+    load_dotenv()
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return client
+
+def initialize_vector_db(embedding_model_name, db_collection_name, vector_db_persist_directory):
+    """
+    Initialize the vector database.
+
+    Args:
+        embedding_model_name (str): Name of the embedding model.
+        db_collection_name (str): Name of the database collection.
+        vector_db_persist_directory (str): Directory to persist the vector database.
+
+    Returns:
+        Chroma: Initialized vector database.
+    """
+    embedding_function = OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"), model=embedding_model_name)
+    vector_db = Chroma(
+        collection_name=db_collection_name,
+        embedding_function=embedding_function,
+        persist_directory=vector_db_persist_directory
+    )
+    return vector_db
+
+def log_to_excel(data, output_folder,output_excel_file_name):
+    """
+    Log the question, response, and references to an Excel file.
+
+    Args:
+        data (list): List of dictionaries containing question, response, and references.
+        output_excel_file_name (str): Name of the output Excel file.
+    """
+    if not data:
+        logger.warning("No data to log.")
+        return
+    # Convert data to a DataFrame
+    df = pd.DataFrame(data)
+    try:
+        #creating the output folder is not exists
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        
+        excelfile_full_path = os.path.join(output_folder,output_excel_file_name)
+        # Check if the output file already exists
+        if os.path.exists(excelfile_full_path):
+            # Append dasta to existing Excel file
+            with pd.ExcelWriter(excelfile_full_path, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                # Determine the starting row for appending
+                start_row = writer.sheets['Sheet1'].max_row
+                df.to_excel(writer, index=False, header=False, startrow=start_row)
+                logger.info(f"Appended data to {output_excel_file_name}.")
+                print(f"Appended results to {output_excel_file_name}.")
+        else:
+            # Create a new Excel file and save data
+            with pd.ExcelWriter(excelfile_full_path, mode='w', engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+                logger.info(f"Created new file and saved results to {output_excel_file_name}.")
+                print(f"Created new file and saved results to {output_excel_file_name}.")
+    except Exception as e:
+        logger.error(f"Error logging data to Excel: {e}")
+
+def ask_question(retriever, openai_client, max_images, output_folder,output_excel_file_name):
+    """
+    Prompt user for questions and log responses.
+
+    Args:
+        retriever (object): Retriever instance for generating answers.
+        openai_client (openai): Initialized OpenAI client.
+        max_images (int): Maximum number of images to generate.
+        output_excel_file_name (str): Name of the output Excel file.
+    """
+    log_data = []
+    while True:
+        question = input("Enter Question (or 'exit' to quit): ")
+        if question.lower() == 'exit':
+            break
+        try:
+            references, response = generate_answer_from_vector_db(retriever, user_question=question, max_images=max_images, openai_client=openai_client)
+            print(f"References:\n{references}\nResponse:\n{response}")
+            # Log the question, response, and references
+            log_data.append({
+                'Question': question,
+                'Response': response,
+                'References': references
+            })
+        except Exception as e:
+            logger.error(f"Error generating answer: {e}")
+            continue
+        # Save the logged data to Excel after each question
+        log_to_excel(log_data, output_folder,output_excel_file_name)
+        log_data = []  # Reset the log_data list
+
+def main():
+    """
+    Main function to run the application.
+    """
+    # Load constants from config
+    data_folder = config['settings']['input_folder']
+    only_text_model_name = config['openai']['openai_only_text_model']
+    multimodel_model_name = config['openai']["openai_text_image_model"]
+    embedding_model_name = config['VectorDB']['embedding_model_name']
+    db_collection_name = config['VectorDB']["collection_name"]
+    output_folder = config['settings']['output_folder']
+    output_excel_file_name = config['settings']["output_excel_filename"]
+    vector_db_persist_directory = config['VectorDB']['vector_db_persist_directory_name']
+    retriever_search_algorithm_name = config['VectorDB']["retriever"]["search_algorithm"]
+    retriver_max_images = config['VectorDB']["retriever"]["max_images"]
+    retriver_top_k = config['VectorDB']["retriever"]["top_k"]
+
+    openai_client = initialize_openai_client()
+
+    vector_db = initialize_vector_db(
+        db_collection_name=db_collection_name,
+        embedding_model_name=embedding_model_name,
+        vector_db_persist_directory=vector_db_persist_directory
+    )
+
+    # Initialize the text splitter
+    text_chunker = RecursiveCharacterTextSplitter(
+        chunk_size=config["text_splitter"]["chunk_size"],
+        chunk_overlap=config["text_splitter"]["chunk_overlap"],
+        length_function=len,
+        is_separator_regex=False
+    )
+
+    # Create retriever instance
+    retriever = create_retriever(vector_db, search_type=retriever_search_algorithm_name, top_k=retriver_top_k)
+
+    # Process all PDFs in the specified folder
+    try:
+        process_all_files(data_folder, vector_db, openai_client, multimodel_model_name, text_chunker=text_chunker)
+        
+    except Exception as e:
+        logger.error(f"Error processing files: {e}")
+
+    # Start asking questions
+    ask_question(retriever=retriever, openai_client=openai_client, max_images=retriver_max_images,output_folder =output_folder , output_excel_file_name=output_excel_file_name)
+
+if __name__ == "__main__":
+    main()
+
+# File: model_interaction.py
+from vector_database import retrieve_documents, create_retriever
+from typing import Any, List, Tuple
+from image_processing import encode_image_base64
+from langchain.schema import Document
+from utilities import config
+
+
+def context_extractor(similar_docs: List[Document], MAX_IMAGES: int) -> Tuple[str, List[str], str, dict]:
+    """
+    Extracts context and image paths from a list of documents.
+
+    Args:
+        similar_docs (List[Document]): A list of Document objects containing metadata and content.
+        MAX_IMAGES (int): The maximum number of images to encode.
+
+    Returns:
+        Tuple[str, List[str], str, dict]: A tuple containing:
+            - context (str): Concatenated text content from all documents.
+            - list_encoded_images (List[str]): List of Base64 encoded images.
+            - model (str): The model name based on the presence of images.
+            - references (dict): A dictionary mapping text and images to their sources.
+    """
+
+    list_image_paths = set()  # Use a set for O(1) lookups
+    list_encoded_images = []
+    context = ""
+    
+    # Retrieve the OpenAI model, defaulting to "gpt-3.5-turbo" if not set
+    model_name = config["openai"].get("openai_only_text_model", "gpt-3.5-turbo") or "gpt-3.5-turbo"
+    
+    references = {
+        "text": [],  # To store the first text reference
+        "image": []  # To store the first image reference
+    }
+
+    first_text_reference_found = False
+    first_image_reference_found = False
+
+    for doc in similar_docs:
+        try:
+            doc_type = doc.metadata.get("Type")
+            pdf_name = doc.metadata.get("Source")  # Assuming Source is a key in metadata
+            page_no = doc.metadata.get("PageNo")    # Assuming PageNo is a key in metadata
+
+            if doc_type == "Image" and len(list_encoded_images) < MAX_IMAGES:
+                image_path = doc.metadata.get("ImagePath")
+                if image_path not in list_image_paths:
+                    encoded_image = encode_image_base64(image_path)
+                    list_encoded_images.append(encoded_image)
+                    list_image_paths.add(image_path)  # Track added image paths
+
+                    if not first_image_reference_found:
+                        references["image"].append({"pdf_name": pdf_name, "page_no": page_no})
+                        first_image_reference_found = True
+
+                    # Retrieve the OpenAI model, defaulting to "gpt-4o" if not set
+                    model_name = config["openai"].get("openai_text_image_model", "gpt-4o") or "gpt-4o"
+
+            elif doc_type == "Text":
+                context += doc.page_content + "\n"
+                if not first_text_reference_found:
+                    references["text"].append({"pdf_name": pdf_name, "page_no": page_no})
+                    first_text_reference_found = True
+
+        except Exception as e:
+            # Log the error or handle it as needed
+            print(f"Error processing document: {e}")  # Replace with proper logging
+
+    # Strip the context and ensure references are single entries
+    return context.strip(), list_encoded_images, model_name, {
+        "text": references["text"][:1],  # Only the first text reference
+        "image": references["image"][:1]  # Only the first image reference, if available
+    }
+
+
+def structure_references(references: dict) -> str:
+    """
+    Structures the references from the given dictionary into a formatted string.
+
+    Args:
+        references (dict): A dictionary containing 'text' and 'image' references.
+
+    Returns:
+        str: A formatted string of references.
+    """
+    formatted_references = []
+
+    if references.get("text"):
+        formatted_references.append("Text:")
+        for ref in references["text"]:
+            pdf_name = ref.get("pdf_name", "Unknown Source").strip()
+            page_no = ref.get("page_no", "Unknown Page")
+            formatted_references.append(f"   PDF Name: {pdf_name}  Page No: {page_no}")
+
+    if references.get("image"):
+        if formatted_references:
+            formatted_references.append("")
+        formatted_references.append("Images:")
+        for ref in references["image"]:
+            pdf_name = ref.get("pdf_name", "Unknown Source").strip()
+            page_no = ref.get("page_no", "Unknown Page")
+            formatted_references.append(f"   PDF Name: {pdf_name}  Page No: {page_no}")
+
+    return "\n".join(formatted_references)
+
+
+def model_response(context: str, image_encodings: list, model_name: str, openai_client: Any, question: str) -> str:
+    """
+    Generates a model response based on the provided context, images, and question.
+
+    Args:
+        context (str): The reference context for answering the question.
+        image_encodings (list): A list of Base64 encoded images.
+        model_name (str): The name of the OpenAI model to use for generating the response.
+        openai_client: The OpenAI client instance.
+        question (str): The question to be answered.
+
+    Returns:
+        str: The generated model response as a string.
+    """
+    text_context = f"**Question:** {question} \n**Context:** {context}\n\n"
+
+    if len(context) == 0 and len(image_encodings) == 0:
+        return "Your question found no relevant answers from the document"
+
+    if model_name == config["openai"]["openai_text_image_model"]:
+        image_context = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_encoding}"}}
+            for image_encoding in image_encodings
+        ]
+
+        response_from_model = openai_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content":"You are an advanced AI assistant designed to provide accurate, concise, and contextually relevant answers to user questions. Your responses should be clear, informative, and formatted in Markdown. Guidelines: Context Utilization: Use the provided context to answer the question at the end. Ensure your response is relevant and integrates the context effectively. Highlight key points from the context to support your answer. Response Clarity: Structure your answers to enhance readability. Use headings, bullet points, and lists where appropriate. Ensure that your language is straightforward and avoids jargon unless necessary. Honesty in Responses: If you do not know the answer to a question, clearly state that you do not know, without attempting to fabricate a response. Avoid guesswork and provide only verified information. Integration of Visuals: When images or additional context are provided, incorporate this information into your answers to enhance understanding. Reference visuals when necessary to clarify your points. User Engagement: Aim to engage users with a friendly and professional tone. Encourage follow-up questions or clarifications to ensure user satisfaction. Formatting Standards: Use appropriate Markdown formatting for headings, lists, and emphasis (bold/italics) to improve the presentation of your answers"
+},
+                {"role": "user", "content": [{"type": "text", "text": text_context}] + image_context}
+            ],
+            temperature=config["openai"]["temperature"],
+        )
+
+        return response_from_model.choices[0].message.content
+
+    elif model_name == config["openai"]["openai_only_text_model"]:
+        response_from_model = openai_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are an advanced AI assistant designed to provide accurate, concise, and contextually relevant answers to user questions. Your responses should be clear, informative, and formatted in Markdown. Guidelines: Context Utilization: Use the provided context to answer the question at the end. Ensure your response is relevant and integrates the context effectively. Highlight key points from the context to support your answer. Response Clarity: Structure your answers to enhance readability. Use headings, bullet points, and lists where appropriate. Ensure that your language is straightforward and avoids jargon unless necessary. Honesty in Responses: If you do not know the answer to a question, clearly state that you do not know, without attempting to fabricate a response. Avoid guesswork and provide only verified information. Integration of Visuals: When images or additional context are provided, incorporate this information into your answers to enhance understanding. Reference visuals when necessary to clarify your points. User Engagement: Aim to engage users with a friendly and professional tone. Encourage follow-up questions or clarifications to ensure user satisfaction. Formatting Standards: Use appropriate Markdown formatting for headings, lists, and emphasis (bold/italics) to improve the presentation of your answers"},
+                {"role": "user", "content": [{"type": "text", "text": text_context}]}
+            ],
+            temperature=config["openai"]["temperature"],
+        )
+
+        return response_from_model.choices[0].message.content
+
+    else:
+        raise ValueError(f"Invalid model name: {model_name}")
+
+
+def generate_answer_from_vector_db(retriever, user_question: str, max_images: int, openai_client) -> Tuple[str, str]:
+    """
+    Generates an answer to a user question using the provided document retriever and OpenAI client.
+
+    Args:
+        retriever (Retriever): The retriever instance used to fetch relevant documents.
+        user_question (str): The question posed by the user.
+        max_images (int): The maximum number of images to include in the response.
+        openai_client: The OpenAI client instance.
+
+    Returns:
+        Tuple[str, str]: A tuple containing the structured references and the generated response.
+    """
+    # Retrieve documents relevant to the user's question
+    similar_documents = retrieve_documents(retriever, user_question)
+
+    # Extract context, image encodings, model name, and references from the documents
+    context, image_encodings, model_name, references = context_extractor(similar_documents, max_images)
+
+    # Generate a response using the extracted context and images
+    generated_response = model_response(
+        context=context,
+        image_encodings=image_encodings,
+        question=user_question,
+        model_name=model_name,
+        openai_client=openai_client
+    )
+
+    # Structure the references into a formatted string
+    formatted_references = structure_references(references)
+
+    # Return the formatted references and the generated response as a tuple
+    return formatted_references, generated_response
+
+
+# File: pdf_processing.py
+
+
+import pdfplumber
+from logging_config import logger
+from typing import Any,List,Tuple
+from vector_database import text_db_insetter,image_db_insetter
+from image_processing import encode_image_base64
+import fitz
+import os
+from image_processing import image_summary_generator
+from utilities import text_splitter,config
+
+def extract_text_from_page(page_data: Any, pdf_name: str, page_no: int) -> str:
+    """
+    Extracts text from a specified page of a PDF.
+
+    Args:
+        page_data (Any): The page data object from which to extract text.
+        pdf_name (str): The name of the PDF file being processed.
+        page_no (int): The page number from which to extract text.
+
+    Returns:
+        str: The extracted text from the page.
+
+    Raises:
+        Exception: If text extraction fails for any reason.
+    """
+    logger.info(f"Extracting text from PDF: {pdf_name}, Page No: {page_no}")
+    
+    try:
+        extracted_text = page_data.extract_text()
+        if extracted_text is None:
+            raise ValueError(f"No text could be extracted from page {page_no} of {pdf_name}.")
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {pdf_name}, Page No: {page_no}. Error: {e}")
+        raise Exception(f"Failed to extract text from page {page_no} of {pdf_name}.") from e
+
+    return extracted_text
+
+
+def extract_images_from_page(page_data: Any, pdf_name: str, page_no: int) -> List[Any]:
+    """
+    Extracts images from a specified page of a PDF.
+
+    Args:
+        page_data (Any): The page data object from which to extract images.
+        pdf_name (str): The name of the PDF file being processed.
+        page_no (int): The page number from which to extract images.
+
+    Returns:
+        List[Any]: A list of extracted images from the page.
+
+    Raises:
+        Exception: If image extraction fails for any reason.
+    """
+    logger.info(f"Extracting images from PDF: {pdf_name}, Page No: {page_no}")
+    
+    try:
+        images = page_data.get_images(full=True)
+        if not images:
+            logger.warning(f"No images found on page {page_no} of {pdf_name}.")
+    except Exception as e:
+        logger.error(f"Error extracting images from PDF: {pdf_name}, Page No: {page_no}. Error: {e}")
+        raise Exception(f"Failed to extract images from page {page_no} of {pdf_name}.") from e
+
+    return images
+
+
+def PDF_text_processor(pdf_path: str, vector_db: Any, text_chunker: Any) -> None:
+    """
+    Extracts text from a PDF, splits it into smaller chunks, and inserts the chunks into a vector database.
+
+    Args:
+        pdf_path (str): The path to the PDF file.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        text_chunker (Any): An instance of the text splitter to use for splitting the text.
+
+    Raises:
+        ValueError: If the PDF path is empty or invalid.
+        Exception: If there is an error while processing the PDF or adding documents to the vector database.
+    """
+    if not pdf_path:
+        raise ValueError("PDF path cannot be empty.")
+
+    logger.info(f"Processing PDF: '{pdf_path}'")
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                extracted_text = extract_text_from_page(page_data=page, pdf_name=pdf_path, page_no=page_num)
+                split_texts = text_splitter(text=extracted_text,text_chunker=text_chunker)
+                text_db_insetter(vector_db=vector_db, texts=split_texts, pdf_name=pdf_path, page_no=page_num)
+    except Exception as e:
+        logger.error(f"Error processing PDF: '{pdf_path}'. Error: {e}")
+        raise Exception(f"Failed to process PDF: '{pdf_path}'.") from e
+
+def PDF_image_processor(pdf_path: str, output_folder: str, vector_db: Any, openai_client: Any, model_name: str, text_chunker: Any) -> None:
+    """
+    Processes images from a PDF file, generates summaries, and inserts them into a vector database.
+
+    Args:
+        pdf_path (str): The path to the PDF file.
+        output_folder (str): The folder where extracted images will be saved.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        openai_client (Any): An instance of the OpenAI client to interact with the API.
+        model_name (str): The name of the OpenAI model to use for generating summaries.
+        text_chunker (Any): An instance of the text splitter to use for splitting text summaries.
+
+    Raises:
+        ValueError: If the PDF path is empty or invalid.
+        Exception: If there is an error while processing the PDF or adding documents to the vector database.
+    """
+    if not pdf_path:
+        raise ValueError("PDF path cannot be empty.")
+    
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    logger.info(f"Processing PDF for image summaries: '{pdf_path}'")
+
+    try:
+        document = fitz.open(pdf_path)
+        for page_num in range(document.page_count):
+            page = document[page_num]
+            images = extract_images_from_page(page_data=page, pdf_name=os.path.basename(pdf_path), page_no=page_num+1)
+
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                base_image = document.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+                image_filename = f"{output_folder}/{os.path.basename(pdf_path)}_page_{page_num + 1}_image_{img_index + 1}.{image_ext}"
+
+                # Save the extracted image
+                with open(image_filename, "wb") as image_file:
+                    image_file.write(image_bytes)
+                logger.info(f"Saved image: {image_filename}")
+
+                # Encode the image to Base64
+                encoded_image = encode_image_base64(image_filename)
+
+                # Generate a summary for the image
+                image_summary = image_summary_generator(encoded_image, model_name, openai_client)
+                logger.info(f"Successfully generated summary for image: {image_filename}")
+
+                # Apply the text splitter on the image summary
+                split_summaries = text_splitter(image_summary,text_chunker )
+                logger.info(f"Successfully split image summary into chunks for image: {image_filename}")
+
+                # Insert the split image summaries into the vector database
+                image_db_insetter(vector_db, split_summaries, image_filename, os.path.basename(pdf_path), page_no = page_num + 1 )
+                logger.info(f"Successfully inserted image summary chunks into vector database for image: {image_filename}")
+
+    except Exception as e:
+        logger.error(f"Error processing PDF: '{pdf_path}'. Error: {e}")
+        raise Exception(f"Failed to process PDF: '{pdf_path}'.") from e
+def process_pdf(pdf_path: str, output_folder: str, vector_db: Any, openai_client: Any, model_name: str, text_chunker: Any) -> None:
+    """
+    Processes a single PDF file using the PDF_image_processor and PDF_text_processor.
+
+    Args:
+        pdf_path (str): The path to the PDF file.
+        output_folder (str): The folder where extracted images will be saved.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        openai_client (Any): An instance of the OpenAI client to interact with the API.
+        model_name (str): The name of the OpenAI model to use for generating summaries.
+        text_chunker (Any): An instance of the text splitter to use for splitting text.
+    """
+    logger.info(f"Processing PDF file: {pdf_path}")
+            
+    try:
+        PDF_text_processor(pdf_path, vector_db, text_chunker)
+        PDF_image_processor(pdf_path, output_folder, vector_db, openai_client, model_name, text_chunker)
+    except Exception as e:
+        logger.error(f"Error processing PDF file '{pdf_path}': {e}")
+
+# File: txt_processing.py
+import os
+from typing import Any
+from logging_config import logger
+from vector_database import text_db_insetter
+from utilities import text_splitter
+
+def text_extracter(file_path: str) -> str:
+    """Extracts and cleans text from a text file.
+
+    Args:
+        file_path (str): The path to the text file.
+
+    Returns:
+        str: Cleaned text extracted from the file.
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        Exception: If there is an error reading the file.
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"The specified file does not exist: {file_path}")
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+        
+        # Remove unwanted newline characters
+        cleaned_content = content.replace('\n', ' ')
+        
+        return cleaned_content
+    except Exception as e:
+        logger.error(f"Error reading file: '{file_path}'. Error: {e}")
+        raise Exception(f"Failed to extract text from file: '{file_path}'.") from e
+
+def process_text(file_path: str, vector_db: Any, text_chunker: Any) -> None:
+    """Processes a text file by extracting text, chunking it, and inserting it into a vector database.
+
+    Args:
+        file_path (str): The path to the text file.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        text_chunker (Any): An instance of the text splitter to use for splitting the text.
+
+    Raises:
+        ValueError: If the file path is empty or invalid.
+        Exception: If there is an error processing the file or adding documents to the vector database.
+    """
+    if not file_path:
+        raise ValueError("File path cannot be empty.")
+
+    logger.info(f"Processing file: '{file_path}'")
+
+    try:
+        # Extract text from the file
+        extracted_text = text_extracter(file_path)
+
+        split_texts = text_splitter(text=extracted_text,text_chunker=text_chunker)
+
+        # Extract the file name from the path
+        file_name = os.path.basename(file_path)
+
+        text_db_insetter(vector_db=vector_db, texts=split_texts, pdf_name=file_name, page_no=1)
+
+        logger.info(f"Successfully processed and inserted chunks from '{file_name}' into the vector database.")
+
+    except ValueError as ve:
+        logger.error(f"Value error while processing file: '{file_name}'. Error: {ve}")
+    except Exception as e:
+        logger.error(f"Error processing file: '{file_name}'. Error: {e}")
+        raise Exception(f"Failed to process file: '{file_name}'.") from e
+
+# File: utilities.py
+from typing import Any, List
+import json
+from logging_config import logger
+
+def text_splitter(text: str, text_chunker: Any) -> List[str]:
+    """
+    Splits a given text into smaller chunks using a text splitter.
+
+    Args:
+        text (str): The text to be split.
+        text_chunker (Any): An instance of the text splitter to use for splitting the text.
+
+    Returns:
+        List[str]: A list of split text chunks.
+
+    Raises:
+        ValueError: If the input text is empty.
+        Exception: If there is an error while splitting the text.
+    """
+    if not text:
+        raise ValueError("The input text cannot be empty.")
+    try:
+        splited_text = text_chunker.split_text(text)
+    except Exception as e:
+        raise Exception(f"An error occurred while splitting the text: {e}")
+    return splited_text
+
+def load_config(config_path='config.json'):
+    """
+    Load configuration settings from a JSON file.
+
+    Args:
+        config_path (str): Path to the configuration file. Defaults to 'config.json'.
+
+    Returns:
+        dict or None: Configuration settings if successful, otherwise None.
+    """
+    try:
+        with open(config_path, 'r') as config_file:
+            return json.load(config_file)
+    except FileNotFoundError:
+        logger.error(f"Config file '{config_path}' not found.")
+        return None
+    except json.JSONDecodeError:
+        logger.error("Error decoding JSON config file.")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading configuration: {e}")
+        return None
+
+config = load_config()
+
+# File: vector_database.py
+from langchain.schema import Document
+from typing import Any, List
+import os
+from logging_config import logger
+from utilities import config
+
+def image_db_insetter(vector_db: Any, image_summaries_texts: List[str], image_path: str, pdf_name: str, page_no: int) -> None:
+    """
+    Inserts image summary documents into a vector database.
+
+    Args:
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        image_summaries_texts (List[str]): A list of summary texts for the images to be added as documents.
+        image_path (str): The file path of the image being processed.
+        pdf_name (str): The name of the PDF source for the documents.
+        page_no (int): The page number from which the image summaries were extracted.
+
+    Raises:
+        ValueError: If the image summaries list is empty or if the page number is invalid.
+        Exception: If there is an error while adding documents to the vector database.
+    """
+    if not image_summaries_texts:
+        raise ValueError("The image summaries list cannot be empty.")
+    if page_no < 1:
+        raise ValueError("Page number must be a positive integer.")
+    
+    documents = []
+    for text in image_summaries_texts:
+        documents.append(Document(page_content=text, metadata={
+            "Source": os.path.basename(pdf_name),
+            "PageNo": page_no,
+            "ImagePath": image_path,
+            "Type": "Image"
+        }))
+    
+    try:
+        vector_db.add_documents(documents=documents)
+    except Exception as e:
+        raise Exception(f"An error occurred while adding documents to the vector database: {e}")
+
+def text_db_insetter(vector_db: Any, texts: List[str], pdf_name: str, page_no: int) -> None:
+    """
+    Inserts text documents into a vector database.
+
+    Args:
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        texts (List[str]): A list of text strings to be added as documents.
+        pdf_name (str): The name of the PDF source for the documents.
+        page_no (int): The page number from which the texts were extracted.
+
+    Raises:
+        ValueError: If the texts list is empty or if the page number is invalid.
+        Exception: If there is an error while adding documents to the vector database.
+    """
+    if not texts:
+        raise ValueError("The texts list cannot be empty.")
+    if page_no < 1:
+        raise ValueError("Page number must be a positive integer.")
+    
+    documents = []
+    for text in texts:
+        documents.append(Document(page_content=text, metadata={
+            "Source": os.path.basename(pdf_name),
+            "PageNo": page_no,
+            "Type": "Text"
+        }))
+    
+    try:
+        vector_db.add_documents(documents=documents)
+    except Exception as e:
+        raise Exception(f"An error occurred while adding documents to the vector database: {e}")
+
+def create_retriever(vector_db: Any, search_type: str, top_k: int) -> Any:
+    """
+    Create a retriever from a vector database with the specified search type and top-k results.
+
+    Args:
+        vector_db (Any): The vector database to create the retriever from.
+        search_type (str): The type of search to use for the retriever.
+        top_k (int): The number of top results to retrieve.
+
+    Returns:
+        Any: The created retriever.
+    """
+    retriever = vector_db.as_retriever(search_type=search_type, search_kwargs={"k": top_k})
+    return retriever
+
+def retrieve_documents(retriever: Any, question: str) -> List[Document]:
+    """
+    Retrieve documents based on a given question using the specified retriever.
+
+    Args:
+        retriever (Any): The retriever instance used to fetch documents.
+        question (str): The question or query for which to retrieve documents.
+
+    Returns:
+        List[Document]: A list of documents retrieved based on the question.
+
+    Raises:
+        ValueError: If the question is empty or invalid.
+        Exception: For any other errors during the retrieval process.
+    """
+    # Input validation
+    if not question or not isinstance(question, str):
+        logger.error("Invalid question provided: %s", question)
+        raise ValueError("The question must be a non-empty string.")
+    
+    try:
+        results = retriever.invoke(input=question)
+        logger.info("Retrieved %d documents for question: %s", len(results), question)
+        
+        return results
+    except Exception as e:
+        logger.error("Error retrieving documents: %s", str(e))
+        return []
+
+
+# File: word_processing.py
+import os
+from typing import Any
+from langchain_community.document_loaders import Docx2txtLoader
+from logging_config import logger
+from vector_database import text_db_insetter
+from utilities import text_splitter
+
+def word_text_extracter(file_path: str) -> str:
+    """Extracts and cleans text from a Word document.
+
+    Args:
+        file_path (str): The path to the Word document.
+
+    Returns:
+        str: Cleaned text extracted from the document.
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        Exception: If there is an error loading the document.
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"The specified file does not exist: {file_path}")
+
+    try:
+        loader = Docx2txtLoader(file_path)
+        data = loader.load()
+        
+        # Extract the page content
+        page_content = data[0].page_content
+        
+        # Remove unwanted newline characters
+        cleaned_content = page_content.replace('\n', ' ')
+        
+        return cleaned_content
+    except Exception as e:
+        logger.error(f"Error loading document: '{file_path}'. Error: {e}")
+        raise Exception(f"Failed to extract text from Word document: '{file_path}'.") from e
+
+def process_word_text(word_path: str, vector_db: Any, text_chunker: Any) -> None:
+    """Processes a Word document by extracting text, chunking it, and inserting it into a vector database.
+
+    Args:
+        word_path (str): The path to the Word document.
+        vector_db (Any): An instance of the vector database to which documents will be added.
+        text_chunker (Any): An instance of the text splitter to use for splitting the text.
+
+    Raises:
+        ValueError: If the Word path is empty or invalid.
+        Exception: If there is an error processing the Word document or adding documents to the vector database.
+    """
+    if not word_path:
+        raise ValueError("Word path cannot be empty.")
+
+    logger.info(f"Processing Word document: '{word_path}'")
+
+    try:
+        # Extract text from the Word document
+        extracted_text = word_text_extracter(word_path)
+
+        split_texts = text_splitter(text=extracted_text,text_chunker=text_chunker)
+
+        # Extract the file name from the path
+        file_name = os.path.basename(word_path)
+
+        text_db_insetter(vector_db=vector_db, texts=split_texts, pdf_name=file_name, page_no=1)
+        logger.info(f"Successfully processed and inserted chunks from '{file_name}' into the vector database.")
+
+    except ValueError as ve:
+        logger.error(f"Value error while processing Word document: '{word_path}'. Error: {ve}")
+        raise
+    except Exception as e:
+        logger.error(f"Error processing Word document: '{word_path}'. Error: {e}")
+        raise Exception(f"Failed to process Word document: '{word_path}'.") from e
+

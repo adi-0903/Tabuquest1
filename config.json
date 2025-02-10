@@ -1,0 +1,25 @@
+{
+    "VectorDB": {
+        "embedding_model_name": "sentence-transformers/all-MiniLM-L6-v2",
+        "collection_name": "my_collection",
+        "vector_db_persist_directory_name": "vector_db",
+        "retriever": {
+            "search_algorithm": "similarity",
+            "max_images": 10,
+            "top_k": 5
+        }
+    },
+    "text_splitter": {
+        "chunk_size": 500,
+        "chunk_overlap": 50
+    },
+    "settings": {
+        "input_folder": "input_folder",
+        "output_folder": "results",
+        "output_excel_filename": "output.xlsx",
+        "image_directory_name": "extracted_images"
+    },
+    "openai": {
+        "openai_text_image_model": "text-davinci-003"
+    }
+}
